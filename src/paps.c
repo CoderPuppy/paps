@@ -169,6 +169,7 @@ static int    output_pages                 (cairo_surface_t * surface,
                                             GList           *pango_lines,
                                             page_layout_t   *page_layout,
                                             gboolean         need_header,
+                                            gboolean         need_footer,
                                             PangoContext    *pango_context);
 static void   eject_column                 (cairo_t         *cr,
                                             page_layout_t   *page_layout,
@@ -712,7 +713,7 @@ int main(int argc, char *argv[])
   page_layout.scale_x = 1.0L;
   page_layout.scale_y = 1.0L;
   if (do_draw_header)
-      page_layout.header_sep =  0; // header_sep;
+      page_layout.header_sep = header_sep;
   else
       page_layout.header_sep = 0;
     
@@ -779,7 +780,7 @@ int main(int argc, char *argv[])
 
   cairo_scale(cr, page_layout.scale_x, page_layout.scale_y);
 
-  output_pages(surface, cr, pango_lines, &page_layout, do_draw_header, pango_context);
+  output_pages(surface, cr, pango_lines, &page_layout, do_draw_header, do_draw_footer, pango_context);
 
   cairo_destroy (cr);
   cairo_surface_finish (surface);
@@ -1021,8 +1022,7 @@ split_text_into_paragraphs (cairo_t *cr,
 
                   pango_layout_set_wrap (para->layout, opt_wrap);
 
-                  if (opt_wrap == PANGO_WRAP_CHAR)
-                      para->wrapped = TRUE;                    
+                  para->wrapped = TRUE;
 
                   /* Should we support truncation as well? */
                 }
@@ -1171,6 +1171,7 @@ output_pages(cairo_surface_t *surface,
              GList         *pango_lines,
              page_layout_t *page_layout,
              gboolean       need_header,
+             gboolean       need_footer,
              PangoContext  *pango_context)
 {
   int column_idx = 0;
@@ -1183,6 +1184,8 @@ output_pages(cairo_surface_t *surface,
   start_page(surface, cr, page_layout);
 
   if (need_header)
+    draw_page_header_line_to_page(cr, FALSE, page_layout, pango_context, page_idx);
+  if (need_footer)
     draw_page_header_line_to_page(cr, TRUE, page_layout, pango_context, page_idx);
 
   while(pango_lines)
@@ -1206,6 +1209,8 @@ output_pages(cairo_surface_t *surface,
               start_page(surface, cr, page_layout);
 
               if (need_header)
+                draw_page_header_line_to_page(cr, FALSE, page_layout, pango_context, page_idx);
+              if (need_footer)
                 draw_page_header_line_to_page(cr, TRUE, page_layout, pango_context, page_idx);
             }
           else
@@ -1370,7 +1375,7 @@ get_date(char *date, int maxlen)
 
   if (date_utf8 == NULL) {
     t = time(NULL);
-    strftime(date, maxlen, "%c", localtime(&t));
+    strftime(date, maxlen, "%FT%T%z", localtime(&t));
 
     cvh = g_iconv_open("UTF-8", get_encoding());
     if (cvh == (GIConv)-1) {
@@ -1420,21 +1425,21 @@ draw_page_header_line_to_page(cairo_t         *cr,
   int height;
   gdouble line_pos;
 
-  /* Reset gravity?? */
-#if 0
-  header = g_strdup_printf("<span font_desc=\"%s\">%s</span>\n"
-                           "<span font_desc=\"%s\">%s</span>\n"
-                           "<span font_desc=\"%s\">%d</span>",
-                           page_layout->header_font_desc,
-                           page_layout->title,
-                           page_layout->header_font_desc,
-                           get_date(date, 255),
-                           page_layout->header_font_desc,
-                           page);
-#endif
-  header = g_strdup_printf("<span font_desc=\"%s\">%d</span>\n",
-                           page_layout->header_font_desc,
-                           page);
+  if(is_footer)
+    header = g_strdup_printf("<span font_desc=\"%s\">%d</span>\n",
+                             page_layout->header_font_desc,
+                             page);
+  else
+    header = g_strdup_printf("<span font_desc=\"%s\">%s %s</span>\n"
+                             "<span font_desc=\"%s\">%s</span>\n"
+                             "<span font_desc=\"%s\">%d</span>",
+                             page_layout->header_font_desc,
+                             get_date(date, 255),
+                             page_layout->title,
+                             page_layout->header_font_desc,
+                             "",
+                             page_layout->header_font_desc,
+                             page);
 
   pango_layout_set_markup(layout, header, -1);
   g_free(header);
@@ -1444,7 +1449,9 @@ draw_page_header_line_to_page(cairo_t         *cr,
   pango_layout_line_get_extents(line,
                                 &ink_rect,
                                 &logical_rect);
-  x_pos = page_layout->left_margin + (page_layout->page_width-page_layout->left_margin-page_layout->right_margin)*0.5 - 0.5*logical_rect.width/PANGO_SCALE;
+  x_pos = page_layout->left_margin;
+  if(is_footer)
+    x_pos += (page_layout->page_width-page_layout->left_margin-page_layout->right_margin)*0.5 - 0.5*logical_rect.width/PANGO_SCALE;
   height = logical_rect.height / PANGO_SCALE /3.0;
 
   /* The header is placed right after the margin */
@@ -1485,13 +1492,13 @@ draw_page_header_line_to_page(cairo_t         *cr,
   g_object_unref(layout);
 
   /* header separator */
-#if 0
-  line_pos = page_layout->top_margin + page_layout->header_height + page_layout->header_sep / 2;
-  cairo_move_to(cr, page_layout->left_margin, line_pos);
-  cairo_line_to(cr,page_layout->page_width - page_layout->right_margin, line_pos);
-  cairo_set_line_width(cr,0.1); // TBD
-  cairo_stroke(cr);
-#endif
+  if(!is_footer) {
+    line_pos = page_layout->top_margin + page_layout->header_height + page_layout->header_sep / 2;
+    cairo_move_to(cr, page_layout->left_margin, line_pos);
+    cairo_line_to(cr,page_layout->page_width - page_layout->right_margin, line_pos);
+    cairo_set_line_width(cr,0.1); // TBD
+    cairo_stroke(cr);
+  }
 
   return logical_rect.height;
 }
