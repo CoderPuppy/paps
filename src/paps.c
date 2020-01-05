@@ -183,7 +183,8 @@ static void   draw_line_to_page            (cairo_t         *cr,
                                             int              column_pos,
                                             page_layout_t   *page_layout,
                                             PangoLayoutLine *line,
-                                            gboolean         draw_wrap_character);
+                                            gboolean         draw_wrap_character,
+                                            gboolean         draw_afterwrap_character);
 static int    draw_page_header_line_to_page(cairo_t         *cr,
                                             gboolean         is_footer,
                                             page_layout_t   *page_layout,
@@ -221,6 +222,32 @@ paps_render_glyph(cairo_scaled_font_t *scaled_font G_GNUC_UNUSED,
       cairo_scale(cr,-1,1);
       // cairo_translate(cr,-120,0);  // Keep glyph protruding to the right.
     }
+    cairo_translate(cr, 20,-50);
+    cairo_move_to(cr, 0, 175);
+    cairo_curve_to(cr, 25.69278, 175, 53.912, 177.59557, 71.25053, 158.75053);
+    cairo_curve_to(cr, 103.52599, 123.67075, 64.54437, 77.19373, 34.99985, 34.99985);
+    cairo_set_line_width(cr, 25);
+    cairo_stroke(cr);
+
+    cairo_move_to(cr,0,0);
+    cairo_line_to(cr,75,0);
+    cairo_line_to(cr,0,75);
+    cairo_close_path(cr);
+    cairo_fill(cr);
+    cairo_restore(cr);
+  }
+	else if (ch == 'r' || ch == 'l')
+  {
+    // A newline sign that I created with MetaPost
+    cairo_save(cr);
+    if (ch == 'l')
+    {
+      cairo_scale(cr,-1,1);
+      // cairo_translate(cr,-120,0);  // Keep glyph protruding to the right.
+    }
+		cairo_translate(cr,-0.3,-0.6);
+    cairo_scale(cr,-0.005,-0.005); // TBD - figure out the scaling.
+		cairo_rotate(cr,-0.7);
     cairo_translate(cr, 20,-50);
     cairo_move_to(cr, 0, 175);
     cairo_curve_to(cr, 25.69278, 175, 53.912, 177.59557, 71.25053, 158.75053);
@@ -1188,6 +1215,7 @@ output_pages(cairo_surface_t *surface,
   if (need_footer)
     draw_page_header_line_to_page(cr, TRUE, page_layout, pango_context, page_idx);
 
+  gboolean draw_afterwrap_character = FALSE;
   while(pango_lines)
     {
       LineLink *line_link = pango_lines->data;
@@ -1230,10 +1258,13 @@ output_pages(cairo_surface_t *surface,
                         column_y_pos+height,
                         page_layout,
                         line,
-                        draw_wrap_character);
+                        draw_wrap_character,
+                        draw_afterwrap_character);
       column_y_pos += height;
       pango_lines = pango_lines->next;
       prev_line_link = line_link;
+
+      draw_afterwrap_character = draw_wrap_character;
     }
   eject_page(cr);
   return page_idx;
@@ -1308,7 +1339,8 @@ draw_line_to_page(cairo_t *cr,
                   int column_pos,
                   page_layout_t *page_layout,
                   PangoLayoutLine *line,
-                  gboolean draw_wrap_character)
+                  gboolean draw_wrap_character,
+                  gboolean draw_afterwrap_character)
 {
   /* Assume square aspect ratio for now */
   double y_pos = page_layout->top_margin
@@ -1354,8 +1386,29 @@ draw_line_to_page(cairo_t *cr,
             + (page_layout->num_columns-1-column_idx)
             * (page_layout->column_width + page_layout->gutter_width);
 
-          cairo_move_to(cr, left_margin, y_pos); 
+          cairo_move_to(cr, left_margin, y_pos);
           cairo_show_text(cr, "L");
+        }
+    }
+
+  if (draw_afterwrap_character)
+    {
+      cairo_set_font_face(cr, paps_glyph_face);
+      cairo_set_font_size(cr, glyph_font_size);
+
+      if (page_layout->pango_dir == PANGO_DIRECTION_LTR)
+        {
+          double left_margin = page_layout->left_margin
+            + (page_layout->num_columns-1-column_idx)
+            * (page_layout->column_width + page_layout->gutter_width);
+
+          cairo_move_to(cr, left_margin, y_pos);
+          cairo_show_text(cr, "r");
+        }
+      else
+        {
+          cairo_move_to(cr, x_pos + page_layout->column_width, y_pos);
+          cairo_show_text(cr, "l");
         }
     }
 }
@@ -1426,16 +1479,24 @@ draw_page_header_line_to_page(cairo_t         *cr,
   gdouble line_pos;
 
   if(is_footer)
-    header = g_strdup_printf("<span font_desc=\"%s\">%d</span>\n",
+    header = g_strdup_printf("<span font_desc=\"%s\"></span>\n"
+				                     "<span font_desc=\"%s\">%d</span>\n"
+				                     "<span font_desc=\"%s\"></span>\n"
+														 "<span font_desc=\"%s\"></span>",
                              page_layout->header_font_desc,
-                             page);
+                             page_layout->header_font_desc,
+                             page,
+                             page_layout->header_font_desc,
+                             page_layout->header_font_desc);
   else
     header = g_strdup_printf("<span font_desc=\"%s\">%s %s</span>\n"
+                             "<span font_desc=\"%s\"></span>\n"
                              "<span font_desc=\"%s\">%s</span>\n"
                              "<span font_desc=\"%s\">%d</span>",
                              page_layout->header_font_desc,
                              get_date(date, 255),
                              page_layout->title,
+                             page_layout->header_font_desc,
                              page_layout->header_font_desc,
                              "",
                              page_layout->header_font_desc,
@@ -1443,16 +1504,6 @@ draw_page_header_line_to_page(cairo_t         *cr,
 
   pango_layout_set_markup(layout, header, -1);
   g_free(header);
-
-  /* output a left edge of header/footer */
-  line = pango_layout_get_line(layout, 0);
-  pango_layout_line_get_extents(line,
-                                &ink_rect,
-                                &logical_rect);
-  x_pos = page_layout->left_margin;
-  if(is_footer)
-    x_pos += (page_layout->page_width-page_layout->left_margin-page_layout->right_margin)*0.5 - 0.5*logical_rect.width/PANGO_SCALE;
-  height = logical_rect.height / PANGO_SCALE /3.0;
 
   /* The header is placed right after the margin */
   if (is_footer)
@@ -1466,11 +1517,18 @@ draw_page_header_line_to_page(cairo_t         *cr,
       page_layout->header_height = height;
     }
 
+  /* output a left edge of header/footer */
+  line = pango_layout_get_line(layout, 0);
+  pango_layout_line_get_extents(line,
+                                &ink_rect,
+                                &logical_rect);
+  x_pos = page_layout->left_margin;
+  height = logical_rect.height / PANGO_SCALE /3.0;
   cairo_move_to(cr, x_pos,y_pos);
   pango_cairo_show_layout_line(cr,line);
 
   /* output a right edge of header/footer */
-  line = pango_layout_get_line(layout, 2);
+  line = pango_layout_get_line(layout, 3);
   pango_layout_line_get_extents(line,
                                 &ink_rect,
                                 &logical_rect);
@@ -1479,8 +1537,18 @@ draw_page_header_line_to_page(cairo_t         *cr,
   cairo_move_to(cr, x_pos,y_pos);
   pango_cairo_show_layout_line(cr,line);
 
-  /* output a "center" of header/footer */
+  /* output a real center edge of header/footer */
   line = pango_layout_get_line(layout, 1);
+  pango_layout_line_get_extents(line,
+                                &ink_rect,
+                                &logical_rect);
+  x_pos = page_layout->left_margin + (page_layout->page_width-page_layout->left_margin-page_layout->right_margin)*0.5 - 0.5*logical_rect.width/PANGO_SCALE;;
+  height = logical_rect.height / PANGO_SCALE /3.0;
+  cairo_move_to(cr, x_pos,y_pos);
+  pango_cairo_show_layout_line(cr,line);
+
+  /* output a "center" of header/footer */
+  line = pango_layout_get_line(layout, 2);
   pango_layout_line_get_extents(line,
                                 &ink_rect,
                                 &logical_rect);
