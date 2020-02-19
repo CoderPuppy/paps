@@ -34,23 +34,26 @@
 #include <string.h>
 #include <time.h>
 #include <locale.h>
-#include <math.h>
-#include <wchar.h>
 #include <libgen.h>
+#include <config.h>
+
+#define _XOPEN_SOURCE /* for wcwidth */
+#include <wchar.h>
+int wcwidth(wchar_t c);
 
 #if ENABLE_NLS
 #include <libintl.h>
 
-#define	_(str)		gettext(str)
+#define _(str)  gettext(str)
 #ifdef gettext_noop
-#define N_(str)		gettext_noop(str)
+#define N_(str) gettext_noop(str)
 #else
-#define N_(str)		(str)
+#define N_(str) (str)
 #endif
 
-#else	/* NLS is disabled */
-#define _(str)		(str)
-#define N_(str)		(str)
+#else /* NLS is disabled */
+#define _(str)  (str)
+#define N_(str) (str)
 #endif
 
 #define BUFSIZE 1024
@@ -64,12 +67,12 @@
  * Cairo sets limit on the comment line for cairo_ps_surface_dsc_comment() to
  * 255 characters, including the initial percent characters.
  */
-#define	CAIRO_COMMENT_MAX       255
+#define CAIRO_COMMENT_MAX       255
 
-#define	MARGIN_LEFT     36
-#define	MARGIN_RIGHT    36
-#define	MARGIN_TOP      36
-#define	MARGIN_BOTTOM   36
+#define MARGIN_LEFT     36
+#define MARGIN_RIGHT    36
+#define MARGIN_TOP      36
+#define MARGIN_BOTTOM   36
 
 
 typedef enum {
@@ -120,6 +123,7 @@ typedef struct {
   gboolean do_tumble;
   gboolean do_landscape;
   gboolean do_justify;
+  gboolean do_show_hyphens;
   gboolean do_separation_line;
   gboolean do_draw_contour;
   gboolean do_show_wrap;
@@ -172,6 +176,7 @@ static int    output_pages                 (cairo_surface_t * surface,
                                             gboolean         need_footer,
                                             PangoContext    *pango_context);
 static void   eject_column                 (cairo_t         *cr,
+                                            double          title_height,
                                             page_layout_t   *page_layout,
                                             int              column_idx);
 static void   eject_page                   (cairo_t         *cr);
@@ -189,7 +194,8 @@ static int    draw_page_header_line_to_page(cairo_t         *cr,
                                             gboolean         is_footer,
                                             page_layout_t   *page_layout,
                                             PangoContext    *ctx,
-                                            int              page);
+                                            int              page,
+                                            int              num_pages);
 static void   postscript_dsc_comments      (cairo_surface_t *surface,
                                             page_layout_t   *page_layout);
 
@@ -236,7 +242,7 @@ paps_render_glyph(cairo_scaled_font_t *scaled_font G_GNUC_UNUSED,
     cairo_fill(cr);
     cairo_restore(cr);
   }
-	else if (ch == 'r' || ch == 'l')
+  else if (ch == 'r' || ch == 'l')
   {
     // A newline sign that I created with MetaPost
     cairo_save(cr);
@@ -245,9 +251,9 @@ paps_render_glyph(cairo_scaled_font_t *scaled_font G_GNUC_UNUSED,
       cairo_scale(cr,-1,1);
       // cairo_translate(cr,-120,0);  // Keep glyph protruding to the right.
     }
-		cairo_translate(cr,-0.3,-0.6);
+    cairo_translate(cr,-0.3,-0.6);
     cairo_scale(cr,-0.005,-0.005); // TBD - figure out the scaling.
-		cairo_rotate(cr,-0.7);
+    cairo_rotate(cr,-0.7);
     cairo_translate(cr, 20,-50);
     cairo_move_to(cr, 0, 175);
     cairo_curve_to(cr, 25.69278, 175, 53.912, 177.59557, 71.25053, 158.75053);
@@ -297,6 +303,92 @@ _paps_arg_paper_cb(const char *option_name,
 }
 
 static gboolean
+parse_int (const char *word,
+           int        *out)
+{
+  char *end;
+  long val;
+  int i;
+
+  if (word == NULL)
+    return FALSE;
+
+  val = strtol (word, &end, 10);
+  i = val;
+
+  if (end != word && *end == '\0' && val >= 0 && val == i)
+    {
+      if (out)
+        *out = i;
+
+      return TRUE;
+    }
+
+  return FALSE;
+}
+
+// A local copy of the deprecated pango_parse_enum.
+gboolean
+copy_pango_parse_enum (GType       type,
+                       const char *str,
+                       int        *value,
+                       gboolean    warn,
+                       char      **possible_values);
+gboolean
+copy_pango_parse_enum (GType       type,
+                       const char *str,
+                       int        *value,
+                       gboolean    warn,
+                       char      **possible_values)
+{
+  GEnumClass *class = NULL;
+  gboolean ret = TRUE;
+  GEnumValue *v = NULL;
+
+  class = g_type_class_ref (type);
+
+  if (G_LIKELY (str))
+    v = g_enum_get_value_by_nick (class, str);
+
+  if (v)
+    {
+      if (G_LIKELY (value))
+        *value = v->value;
+    }
+  else if (!parse_int (str, value))
+    {
+      ret = FALSE;
+      if (G_LIKELY (warn || possible_values))
+      {
+        int i;
+        GString *s = g_string_new (NULL);
+
+        for (i = 0, v = g_enum_get_value (class, i); v;
+            i++  , v = g_enum_get_value (class, i))
+        {
+          if (i)
+            g_string_append_c (s, '/');
+          g_string_append (s, v->value_nick);
+        }
+
+        if (warn)
+          g_warning ("%s must be one of %s",
+                     G_ENUM_CLASS_TYPE_NAME(class),
+                     s->str);
+
+        if (possible_values)
+          *possible_values = s->str;
+
+        g_string_free (s, possible_values ? FALSE : TRUE);
+      }
+    }
+
+  g_type_class_unref (class);
+
+  return ret;
+}
+
+static gboolean
 parse_enum (GType       type,
             int        *value,
             const char *name,
@@ -307,11 +399,11 @@ parse_enum (GType       type,
   char *possible_values = NULL;
   gboolean ret;
 
-  ret = pango_parse_enum (type,
-                          arg,
-                          value,
-                          FALSE,
-                          &possible_values);
+  ret = copy_pango_parse_enum (type,
+                               arg,
+                               value,
+                               FALSE,
+                               &possible_values);
 
   if (!ret && error)
     {
@@ -448,10 +540,10 @@ _paps_arg_cpi_cb(const gchar *option_name,
 
 
 /*
- * Return codeset name of the environment's locale.
+ * Return codeset name of the environment's locale. Use UTF8 by default
  */
 static char*
-get_encoding()
+get_encoding(void)
 {
   static char *encoding = NULL;
 
@@ -471,7 +563,7 @@ static cairo_status_t paps_cairo_write_func(void *closure G_GNUC_UNUSED,
 
 int main(int argc, char *argv[])
 {
-  gboolean do_landscape = FALSE, do_rtl = FALSE, do_justify = FALSE, do_draw_header = FALSE, do_draw_footer=FALSE;
+  gboolean do_landscape = FALSE, do_rtl = FALSE, do_justify = FALSE, do_show_hyphens=FALSE, do_draw_header = FALSE, do_draw_footer=FALSE;
   gboolean do_stretch_chars = FALSE;
   gboolean do_use_markup = FALSE;
   gboolean do_show_wrap = FALSE; /* Whether to show wrap characters */
@@ -499,6 +591,8 @@ int main(int argc, char *argv[])
      N_("Do right-to-left text layout."), NULL},
     {"justify", 0, 0, G_OPTION_ARG_NONE, &do_justify,
      N_("Justify the layout."), NULL},
+    {"hyphens", 0, 0, G_OPTION_ARG_NONE, &do_show_hyphens,
+     N_("Show hyphens when wrapping."), NULL},
     {"wrap", 0, 0, G_OPTION_ARG_CALLBACK, &parse_wrap,
      N_("Text wrapping mode [word, char, word-char]. (Default: word-char)"), "WRAP"},
     {"show-wrap", 0, 0, G_OPTION_ARG_NONE, &do_show_wrap,
@@ -528,7 +622,7 @@ int main(int argc, char *argv[])
     {"markup", 0, 0, G_OPTION_ARG_NONE, &do_use_markup,
      N_("Interpret input text as pango markup."), NULL},
     {"encoding", 0, 0, G_OPTION_ARG_STRING, &encoding,
-     N_("Assume encoding of input text. (Default: encoding of current locale)"), "ENCODING"},
+     N_("Assume encoding of input text. (Default: UTF-8)"), "ENCODING"},
     {"lpi", 0, 0, G_OPTION_ARG_CALLBACK, _paps_arg_lpi_cb,
      N_("Set the amount of lines per inch."), "REAL"},
     {"cpi", 0, 0, G_OPTION_ARG_CALLBACK, _paps_arg_cpi_cb,
@@ -754,6 +848,7 @@ int main(int argc, char *argv[])
   page_layout.do_separation_line = TRUE;
   page_layout.do_landscape = do_landscape;
   page_layout.do_justify = do_justify;
+  page_layout.do_show_hyphens = do_show_hyphens;
   page_layout.do_stretch_chars = do_stretch_chars;
   page_layout.do_use_markup = do_use_markup;
   page_layout.do_tumble = do_tumble;
@@ -845,7 +940,7 @@ read_file (FILE   *file,
   while (1)
     {
       char *ib, *ob, obuffer[BUFSIZE * 6], *bp;
-      gsize iblen, ibleft, oblen;
+      gsize iblen, oblen;
 
       bp = fgets (buffer+inc_seq_bytes, BUFSIZE-inc_seq_bytes-1, file);
       if (inc_seq_bytes)
@@ -920,6 +1015,8 @@ split_text_into_paragraphs (cairo_t *cr,
   gunichar wc;
   GList *result = NULL;
   const char *last_para = text;
+  PangoAttrList *attrs = pango_attr_list_new ();
+  pango_attr_list_insert(attrs, pango_attr_insert_hyphens_new(page_layout->do_show_hyphens));
 
   /* If we are using markup we treat the entire text as a single paragraph.
    * I tested it and found that this is much slower than the split and
@@ -934,12 +1031,12 @@ split_text_into_paragraphs (cairo_t *cr,
       para->text = text;
       para->length = strlen(text);
       para->layout = pango_layout_new (pango_context);
+      pango_layout_set_attributes (para->layout, attrs);
       pango_layout_set_markup (para->layout, para->text, para->length);
       pango_layout_set_justify (para->layout, page_layout->do_justify);
       pango_layout_set_alignment (para->layout,
                                   page_layout->pango_dir == PANGO_DIRECTION_LTR
                                       ? PANGO_ALIGN_LEFT : PANGO_ALIGN_RIGHT);
-
       pango_layout_set_width (para->layout, paint_width * PANGO_SCALE);
       pango_layout_set_wrap (para->layout, opt_wrap);
 
@@ -970,6 +1067,10 @@ split_text_into_paragraphs (cairo_t *cr,
               if (wc == '\r' && *next == '\n')
                   next = g_utf8_next_char(next);
               para->layout = pango_layout_new (pango_context);
+
+              pango_layout_set_attributes (para->layout,attrs);
+
+
               if (page_layout->cpi > 0.0L)
                 {
                   /* figuring out the correct width from the pango_font_metrics_get_approximate_width()
@@ -1207,15 +1308,19 @@ output_pages(cairo_surface_t *surface,
   int pango_column_height = page_layout->column_height * PANGO_SCALE;
   int height = 0;
   LineLink *prev_line_link = NULL;
+  int num_pages = -1; // TBD Calculate this in advance!
+  int title_height = 0;
+  gboolean draw_afterwrap_character = FALSE;
 
   start_page(surface, cr, page_layout);
 
-  if (need_header)
-    draw_page_header_line_to_page(cr, FALSE, page_layout, pango_context, page_idx);
+  if (need_header) {
+      title_height = draw_page_header_line_to_page(cr, FALSE, page_layout, pango_context, page_idx, num_pages);
+      column_y_pos = title_height;
+  }
   if (need_footer)
-    draw_page_header_line_to_page(cr, TRUE, page_layout, pango_context, page_idx);
+    draw_page_header_line_to_page(cr, TRUE, page_layout, pango_context, page_idx, num_pages);
 
-  gboolean draw_afterwrap_character = FALSE;
   while(pango_lines)
     {
       LineLink *line_link = pango_lines->data;
@@ -1228,7 +1333,7 @@ output_pages(cairo_surface_t *surface,
           (prev_line_link && prev_line_link->formfeed))
         {
           column_idx++;
-          column_y_pos = 0;
+          column_y_pos = title_height;
           if (column_idx == page_layout->num_columns)
             {
               column_idx = 0;
@@ -1236,14 +1341,17 @@ output_pages(cairo_surface_t *surface,
               page_idx++;
               start_page(surface, cr, page_layout);
 
-              if (need_header)
-                draw_page_header_line_to_page(cr, FALSE, page_layout, pango_context, page_idx);
+              if (need_header) {
+                title_height = draw_page_header_line_to_page(cr, FALSE, page_layout, pango_context, page_idx, num_pages);
+                column_y_pos = title_height;
+              }
               if (need_footer)
-                draw_page_header_line_to_page(cr, TRUE, page_layout, pango_context, page_idx);
+                draw_page_header_line_to_page(cr, TRUE, page_layout, pango_context, page_idx, num_pages);
             }
           else
             {
               eject_column(cr,
+                           title_height/PANGO_SCALE,
                            page_layout,
                            column_idx
                            );
@@ -1271,6 +1379,7 @@ output_pages(cairo_surface_t *surface,
 }
 
 void eject_column(cairo_t *cr,
+                  double title_height,
                   page_layout_t *page_layout,
                   int column_idx)
 {
@@ -1294,7 +1403,7 @@ void eject_column(cairo_t *cr,
         + page_layout->column_width * column_idx
       + total_gutter;
 
-  y_top = page_layout->top_margin + page_layout->header_height + page_layout->header_sep / 2;
+  y_top = page_layout->top_margin + page_layout->header_height + page_layout->header_sep / 2 + title_height;
   y_bot = page_layout->page_height - page_layout->bottom_margin - page_layout->footer_height;
 
   cairo_move_to(cr,x_pos, y_top);
@@ -1323,7 +1432,7 @@ void start_page(cairo_surface_t *surface,
         {
           cairo_ps_surface_dsc_comment (surface, "%%PageOrientation: Landscape");
           cairo_translate(cr, 0, page_layout->page_width);
-          cairo_rotate(cr, 3*M_PI/2);
+          cairo_rotate(cr, -G_PI_2);
         }
     }
   else
@@ -1416,7 +1525,8 @@ draw_line_to_page(cairo_t *cr,
 /*
  * Provide date string from current locale converted to UTF-8.
  */
-char *
+char* get_date(char *date, int maxlen);
+char*
 get_date(char *date, int maxlen)
 {
   time_t t;
@@ -1467,7 +1577,8 @@ draw_page_header_line_to_page(cairo_t         *cr,
                               gboolean         is_footer,
                               page_layout_t   *page_layout,
                               PangoContext    *ctx,
-                              int              page)
+                              int              page,
+                              int              num_pages)
 {
   PangoLayout *layout = pango_layout_new(ctx);
   PangoLayoutLine *line;
@@ -1478,17 +1589,21 @@ draw_page_header_line_to_page(cairo_t         *cr,
   int height;
   gdouble line_pos;
 
-  if(is_footer)
+  /* Reset gravity?? */
+  // Four lines: left, real center, "center", right
+  if(is_footer) {
+    // Four lines: 2nd is page
     header = g_strdup_printf("<span font_desc=\"%s\"></span>\n"
-				                     "<span font_desc=\"%s\">%d</span>\n"
-				                     "<span font_desc=\"%s\"></span>\n"
-														 "<span font_desc=\"%s\"></span>",
+                             "<span font_desc=\"%s\">%d</span>\n"
+                             "<span font_desc=\"%s\"></span>\n"
+                             "<span font_desc=\"%s\"></span>",
                              page_layout->header_font_desc,
                              page_layout->header_font_desc,
                              page,
                              page_layout->header_font_desc,
                              page_layout->header_font_desc);
-  else
+  } else {
+    // Four lines: date title, blank, blank, page
     header = g_strdup_printf("<span font_desc=\"%s\">%s %s</span>\n"
                              "<span font_desc=\"%s\"></span>\n"
                              "<span font_desc=\"%s\">%s</span>\n"
@@ -1501,9 +1616,18 @@ draw_page_header_line_to_page(cairo_t         *cr,
                              "",
                              page_layout->header_font_desc,
                              page);
+  }
 
   pango_layout_set_markup(layout, header, -1);
   g_free(header);
+
+  /* output a left edge of header/footer */
+  line = pango_layout_get_line(layout, 0);
+  pango_layout_line_get_extents(line,
+                                &ink_rect,
+                                &logical_rect);
+  x_pos = page_layout->left_margin;
+  height = logical_rect.height / PANGO_SCALE /3.0;
 
   /* The header is placed right after the margin */
   if (is_footer)
@@ -1517,13 +1641,6 @@ draw_page_header_line_to_page(cairo_t         *cr,
       page_layout->header_height = height;
     }
 
-  /* output a left edge of header/footer */
-  line = pango_layout_get_line(layout, 0);
-  pango_layout_line_get_extents(line,
-                                &ink_rect,
-                                &logical_rect);
-  x_pos = page_layout->left_margin;
-  height = logical_rect.height / PANGO_SCALE /3.0;
   cairo_move_to(cr, x_pos,y_pos);
   pango_cairo_show_layout_line(cr,line);
 
@@ -1533,7 +1650,7 @@ draw_page_header_line_to_page(cairo_t         *cr,
                                 &ink_rect,
                                 &logical_rect);
   pagenum_rect = logical_rect;
-  x_pos = page_layout->page_width - page_layout->right_margin - (logical_rect.width / PANGO_SCALE );
+	x_pos = page_layout->page_width - page_layout->right_margin - (logical_rect.width / PANGO_SCALE );
   cairo_move_to(cr, x_pos,y_pos);
   pango_cairo_show_layout_line(cr,line);
 
@@ -1561,7 +1678,8 @@ draw_page_header_line_to_page(cairo_t         *cr,
 
   /* header separator */
   if(!is_footer) {
-    line_pos = page_layout->top_margin + page_layout->header_height + page_layout->header_sep / 2;
+    line_pos = page_layout->top_margin + page_layout->header_height + page_layout->header_sep;
+    line_pos += logical_rect.height/2.0/PANGO_SCALE;
     cairo_move_to(cr, page_layout->left_margin, line_pos);
     cairo_line_to(cr,page_layout->page_width - page_layout->right_margin, line_pos);
     cairo_set_line_width(cr,0.1); // TBD

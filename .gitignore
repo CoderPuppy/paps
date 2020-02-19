@@ -46,3 +46,5 @@
 /so_locations
 /stamp-h1
 /tags
+build/
+*.tar.gz
